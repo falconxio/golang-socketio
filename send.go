@@ -3,7 +3,7 @@ package gosocketio
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"fmt"
 	"time"
 
 	"github.com/graarh/golang-socketio/protocol"
@@ -12,16 +12,16 @@ import (
 var (
 	ErrorSendTimeout     = errors.New("Timeout")
 	ErrorSocketOverflood = errors.New("Socket overflood")
+	ErrorSocketClosed    = errors.New("Socket closed")
 )
 
 /**
 Send message packet to socket
 */
-func send(msg *protocol.Message, c *Channel, args interface{}) error {
-	//preventing json/encoding "index out of range" panic
+func send(msg *protocol.Message, c *Channel, args interface{}) (err error) {
 	defer func() {
-		if r := recover(); r != nil {
-			log.Println("socket.io send panic: ", r)
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("socket.io send panic: %v", recovered)
 		}
 	}()
 
@@ -39,13 +39,18 @@ func send(msg *protocol.Message, c *Channel, args interface{}) error {
 		return err
 	}
 
-	if len(c.out) == queueBufferSize {
-		return ErrorSocketOverflood
+	if !c.IsAlive() {
+		return ErrorSocketClosed
 	}
 
-	c.out <- command
-
-	return nil
+	select {
+	case c.out <- command:
+		return nil
+	case <-c.done:
+		return ErrorSocketClosed
+	default:
+		return ErrorSocketOverflood
+	}
 }
 
 /**
@@ -71,12 +76,12 @@ func (c *Channel) Ack(method string, args interface{}, timeout time.Duration) (s
 		Method: method,
 	}
 
-	waiter := make(chan string)
+	waiter := make(chan string, 1)
 	c.ack.addWaiter(msg.AckId, waiter)
 
-	err := send(msg, c, args)
-	if err != nil {
+	if err := send(msg, c, args); err != nil {
 		c.ack.removeWaiter(msg.AckId)
+		return "", err
 	}
 
 	select {

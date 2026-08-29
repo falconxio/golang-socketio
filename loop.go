@@ -47,6 +47,7 @@ type Channel struct {
 
 	alive     bool
 	aliveLock sync.Mutex
+	done      chan struct{}
 
 	ack ackProcessor
 
@@ -62,7 +63,9 @@ func (c *Channel) initChannel() {
 	//TODO: queueBufferSize from constant to server or client variable
 	c.out = make(chan string, queueBufferSize)
 	c.ack.resultWaiters = make(map[int](chan string))
-	c.alive = true
+		c.alive = true
+	c.done = make(chan struct{})
+
 }
 
 /**
@@ -87,22 +90,23 @@ Close channel
 */
 func closeChannel(c *Channel, m *methods, reasons ...error) error {
 	c.aliveLock.Lock()
-	defer c.aliveLock.Unlock()
-
 	if !c.alive {
-		//already closed
+		c.aliveLock.Unlock()
 		return nil
 	}
+	c.alive = false
+	close(c.done)
+	c.aliveLock.Unlock()
 
 	c.conn.Close()
-	c.alive = false
 
-	//clean outloop
+	// Drain queued messages before notifying the output loop to stop.
 	for len(c.out) > 0 {
 		<-c.out
 	}
 	c.out <- protocol.CloseMessage
 
+	// Invoke callbacks after releasing aliveLock so callbacks may inspect or close the channel.
 	m.callLoopEvent(c, OnDisconnection, reasons...)
 
 	overfloodedLock.Lock()
@@ -127,16 +131,23 @@ func inLoop(c *Channel, m *methods) error {
 		}
 
 		switch msg.Type {
-		case protocol.MessageTypeOpen:
-			if err := json.Unmarshal([]byte(msg.Source[1:]), &c.header); err != nil {
-				closeChannel(c, m, ErrorWrongHeader, err)
-			}
-			m.callLoopEvent(c, OnConnection)
-		case protocol.MessageTypePing:
-			c.out <- protocol.PongMessage
+			case protocol.MessageTypeOpen:
+				if len(msg.Source) < 2 {
+					return closeChannel(c, m, ErrorWrongHeader)
+				}
+				if err := json.Unmarshal([]byte(msg.Source[1:]), &c.header); err != nil {
+					return closeChannel(c, m, ErrorWrongHeader, err)
+				}
+				m.callLoopEvent(c, OnConnection)
+			case protocol.MessageTypePing:
+				select {
+				case c.out <- protocol.PongMessage:
+				case <-c.done:
+					return nil
+				}
 		case protocol.MessageTypePong:
-		default:
-			go m.processIncomingMessage(c, msg)
+			default:
+				m.processIncomingMessage(c, msg)
 		}
 	}
 	return nil
@@ -189,11 +200,18 @@ Pinger sends ping messages for keeping connection alive
 func pinger(c *Channel) {
 	for {
 		interval, _ := c.conn.PingParams()
-		time.Sleep(interval)
-		if !c.IsAlive() {
+		timer := time.NewTimer(interval)
+		select {
+		case <-timer.C:
+		case <-c.done:
+			timer.Stop()
 			return
 		}
 
-		c.out <- protocol.PingMessage
+		select {
+		case c.out <- protocol.PingMessage:
+		case <-c.done:
+			return
+		}
 	}
 }
