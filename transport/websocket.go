@@ -2,10 +2,11 @@ package transport
 
 import (
 	"errors"
-	"github.com/gorilla/websocket"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -16,11 +17,13 @@ const (
 	WsDefaultReceiveTimeout = 60 * time.Second
 	WsDefaultSendTimeout    = 60 * time.Second
 	WsDefaultBufferSize     = 1024 * 32
+	WsDefaultMaxMessageSize = 1024 * 1024
 )
 
 var (
 	ErrorBinaryMessage     = errors.New("Binary messages are not supported")
 	ErrorBadBuffer         = errors.New("Buffer error")
+	ErrorMessageTooLarge   = errors.New("Message exceeds maximum size")
 	ErrorPacketWrong       = errors.New("Wrong packet type error")
 	ErrorMethodNotAllowed  = errors.New("Method not allowed")
 	ErrorHttpUpgradeFailed = errors.New("Http upgrade failed")
@@ -38,14 +41,19 @@ func (wsc *WebsocketConnection) GetMessage() (message string, err error) {
 		return "", err
 	}
 
-	//support only text messages exchange
+	// Support only text message exchange.
 	if msgType != websocket.TextMessage {
 		return "", ErrorBinaryMessage
 	}
 
-	data, err := ioutil.ReadAll(reader)
+	maxMessageSize := int64(WsDefaultMaxMessageSize)
+
+	data, err := io.ReadAll(io.LimitReader(reader, maxMessageSize+1))
 	if err != nil {
 		return "", ErrorBadBuffer
+	}
+	if int64(len(data)) > maxMessageSize {
+		return "", ErrorMessageTooLarge
 	}
 	text := string(data)
 

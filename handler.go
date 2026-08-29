@@ -141,10 +141,11 @@ func (m *methods) processIncomingMessage(c *Channel, msg *protocol.Message) {
 		}
 		send(ack, c, result[0].Interface())
 
-	case protocol.MessageTypeAckResponse:
-		waiter, err := c.ack.getWaiter(msg.AckId)
-		if err == nil {
-			waiter <- msg.Args
-		}
+		case protocol.MessageTypeAckResponse:
+			waiter, err := c.ack.getWaiter(msg.AckId)
+			if err == nil {
+				c.ack.removeWaiter(msg.AckId)
+				waiter <- msg.Args
+			}
 	}
 }
